@@ -1,0 +1,7 @@
+{
+  "name": "WardenAi",
+  "description": "Enterprise security enforcement, admit & review engine, policy guardrails, and kill switch for autonomous AI agents by Creignificent LLC.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
