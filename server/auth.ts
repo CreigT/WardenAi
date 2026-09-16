@@ -6,9 +6,23 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { db, hashApiKey } from './db';
-import type { User, Organization, OrganizationMember, Role, AuditLog, AuditEventType, RiskLevel } from '../src/types';
+import type { Organization, OrganizationMember, Role, AuditLog, AuditEventType, RiskLevel } from '../src/types';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'warden-enterprise-jwt-secret-key-creignificent';
+function getJwtSecret(): string {
+  const configured = process.env.JWT_SECRET;
+  if (configured && configured.length >= 32) return configured;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET is required in production and must be at least 32 characters');
+  }
+  return configured || 'warden-local-development-secret-change-me-2026';
+}
+
+function timingSafeStringEqual(a: string, b: string): boolean {
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
+  if (aBuf.length !== bBuf.length) return false;
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
 
 export interface AuthenticatedUser {
   id: string;
@@ -38,15 +52,15 @@ declare global {
 }
 
 /**
- * Simple, tamper-proof signed session token (HMAC-SHA256)
+ * Tamper-proof signed session token (HMAC-SHA256).
  */
 export function generateToken(payload: { userId: string; email: string; orgId?: string }): string {
   const data = JSON.stringify({
     ...payload,
-    exp: Date.now() + 7 * 24 * 3600 * 1000 // 7 days
+    exp: Date.now() + 7 * 24 * 3600 * 1000
   });
   const encoded = Buffer.from(data).toString('base64url');
-  const signature = crypto.createHmac('sha256', JWT_SECRET).update(encoded).digest('base64url');
+  const signature = crypto.createHmac('sha256', getJwtSecret()).update(encoded).digest('base64url');
   return `${encoded}.${signature}`;
 }
 
@@ -55,16 +69,12 @@ export function verifyToken(token: string): { userId: string; email: string; org
     const [encoded, signature] = token.split('.');
     if (!encoded || !signature) return null;
 
-    const expectedSig = crypto.createHmac('sha256', JWT_SECRET).update(encoded).digest('base64url');
-    if (signature !== expectedSig) return null;
+    const expectedSig = crypto.createHmac('sha256', getJwtSecret()).update(encoded).digest('base64url');
+    if (!timingSafeStringEqual(signature, expectedSig)) return null;
 
     const json = Buffer.from(encoded, 'base64url').toString('utf-8');
     const payload = JSON.parse(json);
-
-    if (payload.exp && payload.exp < Date.now()) {
-      return null;
-    }
-
+    if (payload.exp && payload.exp < Date.now()) return null;
     return payload;
   } catch {
     return null;
@@ -72,7 +82,7 @@ export function verifyToken(token: string): { userId: string; email: string; org
 }
 
 /**
- * Appends persistent audit log record
+ * Appends persistent audit log record.
  */
 export function logAuditEvent(params: {
   organization_id: string;
@@ -107,53 +117,60 @@ export function logAuditEvent(params: {
   };
 
   store.audit_logs.unshift(log);
-  // Cap in-memory/file audit log count to a reasonable size if needed
-  if (store.audit_logs.length > 2000) {
-    store.audit_logs = store.audit_logs.slice(0, 2000);
-  }
-  db.persist();
+  if (store.audit_logs.length > 2000) store.audit_logs = store.audit_logs.slice(0, 2000);
+  void db.persist();
   return log;
 }
 
+function isPublicAuthRoute(req: Request): boolean {
+  const path = req.path;
+  return path === '/v1/auth/login'
+    || path === '/v1/auth/signup'
+    || path === '/v1/auth/reset-password'
+    || path === '/v1/auth/google';
+}
+
 /**
- * Express Middleware: Authenticates either via User JWT Token OR Project API Key
+ * Authenticates either via user session token or project API key.
+ * Fails closed: protected API routes do not receive an anonymous demo identity.
  */
 export function authenticate(req: Request, res: Response, next: NextFunction): void {
   const authHeader = req.headers.authorization;
   const apiKeyHeader = req.headers['x-api-key'] as string | undefined;
   const orgHeader = req.headers['x-organization-id'] as string | undefined;
 
-  let token = '';
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    token = authHeader.substring(7).trim();
-  } else if (apiKeyHeader) {
-    token = apiKeyHeader.trim();
+  if (req.path === '/v1/auth/google' && process.env.ENABLE_GOOGLE_LOGIN !== 'true') {
+    res.status(403).json({ error: 'Google login is disabled. Set ENABLE_GOOGLE_LOGIN=true only after configuring a verified OAuth flow.' });
+    return;
   }
 
+  let token = '';
+  if (authHeader?.startsWith('Bearer ')) token = authHeader.substring(7).trim();
+  else if (apiKeyHeader) token = apiKeyHeader.trim();
+
   if (!token) {
-    // Check if demo user fallback is available for playground/public requests
-    req.auth = {};
-    return next();
+    if (isPublicAuthRoute(req)) {
+      req.auth = {};
+      return next();
+    }
+    res.status(401).json({ error: 'Authentication required' });
+    return;
   }
 
   const store = db.get();
 
-  // 1. Check if token is an API key (starts with 'warden_live_' or 'warden_test_')
+  // Project API keys are developer-scoped credentials.
   if (token.startsWith('warden_live_') || token.startsWith('warden_test_')) {
     const hashed = hashApiKey(token);
-    const key = store.api_keys.find(k => k.key_hash === hashed && !k.revoked);
-
+    const key = store.api_keys.find(k => !k.revoked && timingSafeStringEqual(k.key_hash, hashed));
     if (!key) {
       res.status(401).json({ error: 'Unauthorized: Invalid or revoked API key' });
       return;
     }
 
-    // Update key last used timestamp
     key.last_used_at = new Date().toISOString();
-    db.persist();
-
+    void db.persist();
     const org = store.organizations.find(o => o.id === key.organization_id);
-
     req.auth = {
       organization: org,
       apiKey: {
@@ -166,7 +183,6 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
     return next();
   }
 
-  // 2. Otherwise treat as user JWT session token
   const verified = verifyToken(token);
   if (verified) {
     const user = store.users.find(u => u.id === verified.userId);
@@ -174,7 +190,6 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
       const activeOrgId = orgHeader || verified.orgId || store.members.find(m => m.user_id === user.id)?.organization_id;
       const org = store.organizations.find(o => o.id === activeOrgId);
       const member = org ? store.members.find(m => m.organization_id === org.id && m.user_id === user.id) : undefined;
-
       req.auth = {
         user: {
           id: user.id,
@@ -189,13 +204,9 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
     }
   }
 
-  // Invalid token
   res.status(401).json({ error: 'Unauthorized: Invalid or expired token' });
 }
 
-/**
- * Strict authentication guard
- */
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
   if (!req.auth?.user && !req.auth?.apiKey) {
     res.status(401).json({ error: 'Authentication required' });
@@ -204,13 +215,9 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   next();
 }
 
-/**
- * Tenant isolation guard: Ensures target resource organization matches user/key organization
- */
+/** Tenant isolation guard. */
 export function requireOrgAccess(req: Request, res: Response, next: NextFunction): void {
-  const store = db.get();
   const targetOrgId = req.params.orgId || req.body?.organization_id || req.query?.organization_id as string;
-
   const currentOrgId = req.auth?.organization?.id || req.auth?.apiKey?.organization_id;
 
   if (!currentOrgId) {
@@ -219,7 +226,6 @@ export function requireOrgAccess(req: Request, res: Response, next: NextFunction
   }
 
   if (targetOrgId && targetOrgId !== currentOrgId) {
-    // Cross-tenant access attempted!
     logAuditEvent({
       organization_id: currentOrgId,
       user_id: req.auth?.user?.id,
@@ -237,16 +243,13 @@ export function requireOrgAccess(req: Request, res: Response, next: NextFunction
   next();
 }
 
-/**
- * Role-Based Access Control (RBAC) Guard
- */
+/** Role-Based Access Control guard. API keys never inherit admin/owner authority. */
 export function requireRole(allowedRoles: Role[]) {
   return (req: Request, res: Response, next: NextFunction) => {
-    // API keys with project scopes act as 'developer'
     if (req.auth?.apiKey) {
-      if (allowedRoles.includes('developer') || allowedRoles.includes('admin') || allowedRoles.includes('viewer')) {
-        return next();
-      }
+      if (allowedRoles.includes('developer')) return next();
+      res.status(403).json({ error: 'Forbidden: API keys are developer-scoped and cannot perform owner/admin operations' });
+      return;
     }
 
     const member = req.auth?.member;
