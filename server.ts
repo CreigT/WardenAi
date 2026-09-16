@@ -11,6 +11,7 @@ import { createServer as createViteServer } from 'vite';
 import { initDb } from './server/db';
 import { apiRouter } from './server/routes';
 import { controlPlaneRouter } from './server/controlPlaneRoutes';
+import { opsGuardRouter } from './server/opsGuardRoutes';
 
 async function startServer() {
   // Initialize persistence layer and seed data
@@ -44,6 +45,9 @@ async function startServer() {
       timestamp: new Date().toISOString()
     });
   });
+
+  // Ops Agent safety limits must run before the general control plane.
+  app.use('/api', opsGuardRouter);
 
   // The hardened control-plane routes are mounted first so their /admit,
   // /reviews and /execute handlers are the authoritative enforcement path.
