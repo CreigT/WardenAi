@@ -52,6 +52,8 @@ export interface Project {
 export interface PolicyRules {
   allowed_tools: string[];
   blocked_tools: string[];
+  review_tools?: string[];
+  review_actions?: string[];
   allowed_paths: string[];
   blocked_paths: string[];
   allowed_domains: string[];
@@ -99,8 +101,10 @@ export interface AgentSession {
   metadata?: Record<string, any>;
 }
 
-export type Decision = 'ALLOW' | 'DENY';
+export type Decision = 'ALLOW' | 'REVIEW' | 'DENY';
 export type ReviewDecision = 'CONTINUE' | 'WARN' | 'TERMINATE';
+export type HumanReviewDecision = 'APPROVE' | 'REJECT';
+export type ExecutionStatus = 'pending' | 'approved' | 'rejected' | 'executed' | 'failed';
 export type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
 
 export interface AgentAction {
@@ -118,6 +122,12 @@ export interface AgentAction {
   admit_rule_id?: string;
   admit_risk_level: RiskLevel;
   admitted_at: string;
+  human_review_decision?: HumanReviewDecision;
+  human_review_reason?: string;
+  human_reviewed_at?: string;
+  human_reviewed_by?: string;
+  execution_status?: ExecutionStatus;
+  executed_at?: string;
   review_decision?: ReviewDecision;
   review_reason?: string;
   review_risk_level?: RiskLevel;
@@ -138,12 +148,22 @@ export type AuditEventType =
   | 'api_key.revoked'
   | 'session.created'
   | 'session.admit_allow'
+  | 'session.admit_review'
   | 'session.admit_deny'
+  | 'session.review_requested'
+  | 'session.review_approved'
+  | 'session.review_rejected'
   | 'session.review_continue'
   | 'session.review_warn'
   | 'session.review_terminate'
+  | 'session.execution_started'
+  | 'session.execution_succeeded'
+  | 'session.execution_failed'
   | 'session.policy_violation'
   | 'session.terminated'
+  | 'integration.connected'
+  | 'integration.disconnected'
+  | 'credential.accessed'
   | 'billing.subscription_updated'
   | 'team.member_invited'
   | 'team.member_removed'
@@ -161,7 +181,7 @@ export interface AuditLog {
   session_id?: string;
   action_id?: string;
   event_type: AuditEventType;
-  decision?: Decision | ReviewDecision;
+  decision?: Decision | ReviewDecision | HumanReviewDecision;
   reason?: string;
   risk_level?: RiskLevel;
   metadata?: Record<string, any>;
@@ -179,6 +199,17 @@ export interface ApiKey {
   last_used_at?: string;
   expires_at?: string;
   revoked: boolean;
+}
+
+export type IntegrationProvider = 'gmail' | 'stripe' | 'github' | 'vercel' | 'google_drive' | 'google_calendar';
+
+export interface IntegrationStatus {
+  provider: IntegrationProvider;
+  connected: boolean;
+  configured: boolean;
+  mode: 'credential_proxy' | 'planned';
+  protected_actions: string[];
+  last_checked_at?: string;
 }
 
 export type SubscriptionPlan = 'developer' | 'pro' | 'business';
@@ -209,7 +240,7 @@ export interface UsageRecord {
   id: string;
   organization_id: string;
   project_id: string;
-  period: string; // YYYY-MM
+  period: string;
   admit_requests: number;
   admit_allows: number;
   admit_denies: number;
@@ -242,6 +273,25 @@ export interface AdmitResponse {
   timestamp: string;
   action_id: string;
   session_status: SessionStatus;
+}
+
+export interface HumanReviewRequest {
+  action_id: string;
+  decision: HumanReviewDecision;
+  reason?: string;
+}
+
+export interface ExecuteRequest {
+  action_id: string;
+}
+
+export interface ExecuteResponse {
+  success: boolean;
+  action_id: string;
+  provider: string;
+  execution_status: ExecutionStatus;
+  result?: any;
+  error?: string;
 }
 
 export interface ReviewRequest {
