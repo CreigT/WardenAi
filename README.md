@@ -17,6 +17,36 @@ WardenAI decides what autonomous agents may do, requires human approval for sens
 - WardenAI performs supported provider calls from the server-side execution gateway.
 - Every admit, review, credential access, execution result, and kill-switch event is written to the audit log.
 
+## SECURE
+
+- Credentials remain server-side only. Agents never receive provider tokens.
+- Deny-by-default for unlisted tools. Explicit allowlist + forced REVIEW for sensitive actions (e.g. gmail.send).
+- API keys are developer-scoped and cannot perform owner/admin approvals.
+- All security-relevant events (admit, review, execute, kill) are written to the audit log.
+- Current limitation: file-backed store is ephemeral on Vercel. Do not use for real tenant data until replaced.
+
+## VERIFY
+
+Verification is evidence, not claims. Minimum checks before treating any path as enforced:
+
+- Confirm an agent request for a blocked tool returns DENY and produces an audit entry.
+- Confirm gmail.send returns REVIEW and cannot execute until an owner/admin approves it.
+- Confirm a kill-switch call terminates the session and appears in the audit log.
+- Confirm no API response ever returns the raw GMAIL_ACCESS_TOKEN or other provider secret.
+- Confirm an API key cannot approve a REVIEW action.
+
+A passing local demo is not production verification. Production verification requires a durable store and the checks above against that store.
+
+See `docs/VERIFY_WALKTHROUGH.md` for a concrete step-by-step check on the Gmail send path.
+
+## DOCUMENT
+
+- This README is the public operational summary.
+- Full operational card: `docs/OPERATIONAL_CARD.md`
+- Verification walkthrough: `docs/VERIFY_WALKTHROUGH.md`
+- Hybrid crypto notes (if present): `docs/warden-hybrid-crypto-v1.md`
+- Code is the implementation; the operational card + verification walkthrough define the intended trust boundaries.
+
 ## Console
 
 The application is organized around the enforcement lifecycle:
